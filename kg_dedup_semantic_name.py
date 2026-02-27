@@ -37,6 +37,25 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+
+class _Tee:
+    """Write to both the original stream and a log file simultaneously."""
+
+    def __init__(self, stream, log_file):
+        self._stream = stream
+        self._log = log_file
+
+    def write(self, data):
+        self._stream.write(data)
+        self._log.write(data)
+
+    def flush(self):
+        self._stream.flush()
+        self._log.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -91,6 +110,11 @@ def to_lookup_key(name: str) -> str:
     s = _strip_code_separator(s)        # normalise code separators
     s = s.replace('-', ' ')             # hyphen = space for comparison
     s = re.sub(r'\s+', ' ', s).strip()
+    # Plural normalisation: strip trailing 's' unless preceded by a vowel or 's'
+    # Catches: "records"→"record", "screens"→"screen", "groups"→"group"
+    # Safe against: "status" (u+s), "class" (s+s), "process" (s+s)
+    if len(s) > 2 and s[-1] == 's' and s[-2] not in 'aeiou s':
+        s = s[:-1]
     return s
 
 
@@ -597,33 +621,6 @@ async def apply_merge(
 # Embedding-based similarity detection
 # ============================================================================
 
-async def fetch_entities_with_vectors(
-    conn: asyncpg.Connection, workspace: str, entity_table: str
-) -> list[dict]:
-    """Fetch entity names + their embedding vectors from the VDB table (content_vector)."""
-    ws_clause, ws_params = _workspace_clause(workspace)
-    rows = await conn.fetch(
-        f"""
-        SELECT id, entity_name, content_vector::text AS vec_str
-        FROM "{entity_table}"
-        WHERE {ws_clause} AND content_vector IS NOT NULL
-        ORDER BY entity_name
-        """,
-        *ws_params,
-    )
-    result = []
-    for r in rows:
-        vec_str = r["vec_str"]
-        try:
-            vec = np.array([float(x) for x in vec_str.strip("[]").split(",")], dtype=np.float32)
-            norm = np.linalg.norm(vec)
-            if norm > 0:
-                vec = vec / norm   # pre-normalise for fast cosine via dot product
-            result.append({"id": r["id"], "entity_name": r["entity_name"], "vector": vec})
-        except Exception:
-            pass   # skip if vector is malformed
-    return result
-
 
 async def embed_entity_names(
     names: list[str],
@@ -771,270 +768,8 @@ def _find_similar_clusters(
     return [group for group in clusters.values() if len(group) >= 2]
 
 
-async def run_detect_similar(
-    workspace: str, env_path: str, threshold: float
-) -> None:
-    """
-    Detect semantically similar entity pairs/clusters using embedding cosine similarity.
-    Output is informational only — no DB changes.
-    """
-    if not _NUMPY_OK:
-        print("numpy is required for --detect-similar. Run: pip install numpy")
-        return
-
-    print(f"\n{'=' * 62}")
-    print(f"  Embedding Similarity Detector")
-    print(f"  Workspace : '{workspace}'")
-    print(f"  Threshold : {threshold:.2f}  (cosine similarity)")
-    print(f"  Env file  : {env_path}")
-    print(f"{'=' * 62}\n")
-
-    conn = await make_connection(env_path)
-    try:
-        entity_table, _ = await discover_tables(conn)
-        print(f"  Entity table : {entity_table}\n")
-
-        entities = await fetch_entities_with_name_vectors(conn, workspace, entity_table, env_path)
-        print(f"  Entities embedded     : {len(entities)}")
-
-        if len(entities) < 2:
-            print("  Not enough entities to compare.")
-            return
-
-        clusters = _find_similar_clusters(entities, threshold)
-
-        if not clusters:
-            print(f"\n  [OK] No entity pairs found with similarity >= {threshold:.2f}")
-            print(f"{'=' * 62}\n")
-            return
-
-        # Sort clusters by highest intra-cluster similarity (most similar first)
-        vec_by_name = {e["entity_name"]: e["vector"] for e in entities}
-        def max_sim(group):
-            sims = []
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    s = float(vec_by_name[group[i]] @ vec_by_name[group[j]])
-                    sims.append(s)
-            return max(sims) if sims else 0.0
-
-        clusters_sorted = sorted(clusters, key=max_sim, reverse=True)
-
-        print(f"\n  Similar clusters found : {len(clusters_sorted)}\n")
-
-        for i, group in enumerate(clusters_sorted, 1):
-            # Find the pair with highest similarity in this cluster
-            best_sim = 0.0
-            for a_idx in range(len(group)):
-                for b_idx in range(a_idx + 1, len(group)):
-                    s = float(vec_by_name[group[a_idx]] @ vec_by_name[group[b_idx]])
-                    if s > best_sim:
-                        best_sim = s
-
-            canonical = pick_canonical(group)
-
-            print(f"  [{i:03d}] similarity={best_sim:.4f}  canonical → \"{canonical}\"")
-            for name in sorted(group):
-                marker = "[K]" if name == canonical else "[~]"
-                print(f"         {marker} \"{name}\"")
-            print()
-
-        print(f"  Tip: Add confirmed pairs to FIXED_CANONICAL in kg_dedup.py,")
-        print(f"       then re-run  kg_dedup.py --apply  to merge them.")
-        print(f"{'=' * 62}\n")
-
-    finally:
-        await conn.close()
 
 
-def sync_graphml_with_vdb(graphml_path: str, vdb_entity_names: set[str]) -> tuple[int, int]:
-    """
-    Remove from the GraphML file any node whose ID is not in vdb_entity_names.
-    Edges to/from removed nodes are also removed (networkx handles this with remove_node).
-    Returns (nodes_removed, edges_removed).
-    """
-    try:
-        import networkx as nx
-    except ImportError:
-        print("  [!] networkx not installed -- GraphML sync skipped.")
-        return 0, 0
-
-    G = nx.read_graphml(graphml_path)
-    orphans = [n for n in list(G.nodes()) if n not in vdb_entity_names]
-
-    if not orphans:
-        return 0, 0
-
-    edges_removed = sum(G.degree(n) for n in orphans)
-    for n in orphans:
-        G.remove_node(n)   # also removes attached edges
-
-    nx.write_graphml(G, graphml_path)
-    return len(orphans), edges_removed
-
-
-async def delete_entities(
-    conn: asyncpg.Connection,
-    workspace: str,
-    names_to_delete: list[str],
-    entity_table: str,
-    relation_table: str,
-    graphml_files: list[str],
-    dry_run: bool,
-) -> None:
-    """
-    Delete specific entity nodes (by name) from all storage layers.
-    Relations touching those entities are also removed.
-    """
-    ws_clause, ws_params = _workspace_clause(workspace)
-    p = len(ws_params)
-
-    not_found = []
-    deleted = 0
-    relations_removed = 0
-
-    for name in names_to_delete:
-        # Look up the entity
-        rows = await conn.fetch(
-            f'SELECT id, entity_name FROM "{entity_table}" WHERE {ws_clause} AND entity_name=${ p+1}',
-            *ws_params, name,
-        )
-        if not rows:
-            not_found.append(name)
-            continue
-
-        for row in rows:
-            eid = row["id"]
-            src, tgt = await count_relation_refs(conn, workspace, eid, relation_table, row["entity_name"])
-            total_refs = src + tgt
-            print(f"  [D] DELETE: \"{name}\"  (refs: {src}-> {tgt}<-  total:{total_refs})")
-
-            if not dry_run:
-                async with conn.transaction():
-                    # Remove relations
-                    await conn.execute(
-                        f'DELETE FROM "{relation_table}" WHERE {ws_clause} AND source_id=${p+1}',
-                        *ws_params, eid,
-                    )
-                    await conn.execute(
-                        f'DELETE FROM "{relation_table}" WHERE {ws_clause} AND target_id=${p+1}',
-                        *ws_params, eid,
-                    )
-                    # Remove entity
-                    await conn.execute(
-                        f'DELETE FROM "{entity_table}" WHERE {ws_clause} AND id=${p+1}',
-                        *ws_params, eid,
-                    )
-                # Remove from GraphML
-                for gml_path in graphml_files:
-                    try:
-                        import networkx as nx
-                        G = nx.read_graphml(gml_path)
-                        if name in G:
-                            G.remove_node(name)
-                            nx.write_graphml(G, gml_path)
-                            print(f"         [+] GraphML node removed: {os.path.basename(gml_path)}")
-                    except Exception as e:
-                        print(f"         [!] GraphML update failed: {e}")
-
-                deleted += 1
-                relations_removed += total_refs
-            else:
-                deleted += 1
-                relations_removed += total_refs
-
-    if not_found:
-        print(f"\n  [!] Not found in workspace: {not_found}")
-    print(f"\n  Entities {'to delete' if dry_run else 'deleted'}: {deleted}")
-    print(f"  Relations {'affected' if dry_run else 'removed'} : {relations_removed}")
-
-
-async def run_delete(workspace: str, env_path: str, names: list[str], apply: bool) -> None:
-    """Delete specific entities by name from all storage layers."""
-    dry_run = not apply
-    print(f"\n{'=' * 62}")
-    print(f"  Entity Deletion")
-    print(f"  Workspace : '{workspace}'")
-    print(f"  Mode      : {'DRY RUN -- no changes' if dry_run else '[!] APPLY -- deleting entities'}")
-    print(f"  Targets   : {len(names)} entity name(s)")
-    print(f"{'=' * 62}\n")
-
-    conn = await make_connection(env_path)
-    try:
-        entity_table, relation_table = await discover_tables(conn)
-        print(f"  Entity table  : {entity_table}")
-        graphml_files = discover_graphml_files(env_path, workspace)
-        if graphml_files:
-            print(f"  GraphML files : {[os.path.basename(f) for f in graphml_files]}")
-        print()
-
-        await delete_entities(
-            conn, workspace, names,
-            entity_table, relation_table,
-            graphml_files, dry_run,
-        )
-
-        if dry_run:
-            print(f"\n  → Run with --apply to execute.")
-        else:
-            print(f"\n  [!] Restart the LightRAG server to reload the graph.")
-        print(f"{'=' * 62}\n")
-    finally:
-        await conn.close()
-
-
-async def run_fix_graphml(workspace: str, env_path: str) -> None:
-    """
-    Sync the GraphML file with the VDB entity table:
-    remove any GraphML node whose entity name is not present in the VDB table.
-    This repairs the GraphML when --apply was run before GraphML support was added.
-    """
-    print(f"\n{'=' * 62}")
-    print(f"  GraphML Sync (fix-graphml)")
-    print(f"  Workspace : '{workspace}'")
-    print(f"  Env file  : {env_path}")
-    print(f"{'=' * 62}\n")
-
-    conn = await make_connection(env_path)
-    try:
-        entity_table, _ = await discover_tables(conn)
-        print(f"  Entity table  : {entity_table}")
-
-        graphml_files = discover_graphml_files(env_path, workspace)
-        if not graphml_files:
-            print("  [!] No GraphML files found for this workspace.")
-            return
-        print(f"  GraphML files : {[os.path.basename(f) for f in graphml_files]}\n")
-
-        entities = await fetch_entities(conn, workspace, entity_table)
-        vdb_names = {e["entity_name"] for e in entities}
-        print(f"  VDB entities  : {len(vdb_names)}")
-
-        for gml_path in graphml_files:
-            try:
-                import networkx as nx
-                G = nx.read_graphml(gml_path)
-                print(f"  GraphML nodes : {G.number_of_nodes()}  edges: {G.number_of_edges()}")
-            except Exception as e:
-                print(f"  [!] Could not read GraphML: {e}")
-                continue
-
-            removed_nodes, removed_edges = sync_graphml_with_vdb(gml_path, vdb_names)
-            if removed_nodes:
-                print(f"\n  [+] Removed {removed_nodes} orphan node(s) and {removed_edges} edge(s)")
-                print(f"  [+] GraphML saved: {os.path.basename(gml_path)}")
-                try:
-                    G2 = nx.read_graphml(gml_path)
-                    print(f"  GraphML now   : {G2.number_of_nodes()} nodes, {G2.number_of_edges()} edges")
-                except Exception:
-                    pass
-            else:
-                print(f"\n  [OK] GraphML is already in sync with VDB -- no changes needed.")
-
-        print(f"\n  [!] Restart the LightRAG server to reload the graph.")
-        print(f"{'=' * 62}\n")
-    finally:
-        await conn.close()
 
 
 async def run(workspace: str, env_path: str, apply: bool) -> None:
@@ -1319,6 +1054,7 @@ async def fetch_entity_descriptions(
     return result
 
 
+
 def _build_llm_dedup_prompt(clusters: list[list[dict]], start_index: int = 1) -> str:
     """
     Build LLM prompt from similarity clusters.
@@ -1343,7 +1079,7 @@ def _build_llm_dedup_prompt(clusters: list[list[dict]], start_index: int = 1) ->
 async def _call_llm_for_dedup(
     clusters: list[list[dict]],
     env_path: str,
-    batch_size: int = 30,  # groups per LLM call
+    batch_size: int = 30 ,  # groups per LLM call
 ) -> list[dict]:
     """
     Call the configured LLM to decide merges for the given similarity clusters.
@@ -1423,6 +1159,7 @@ async def run_llm_dedup(
     env_path: str,
     threshold: float,
     apply: bool,
+    forced_pairs: list[tuple[str, str]] | None = None,
 ) -> None:
     """
     Post-hoc LLM-based deduplication:
@@ -1505,6 +1242,23 @@ async def run_llm_dedup(
 
         # Step 2: Find similarity clusters
         clusters = _find_similar_clusters(entities, threshold)
+
+        # Inject forced pairs (bypass cosine threshold) — go straight to LLM review
+        if forced_pairs:
+            entity_name_set = {e["entity_name"] for e in entities}
+            for p1, p2 in forced_pairs:
+                missing = [n for n in (p1, p2) if n not in entity_name_set]
+                if missing:
+                    print(f"  [!] Force-pair: not in entities (missing or text-dup alias): {missing}")
+                    continue
+                if any(p1 in c and p2 in c for c in clusters):
+                    print(f"  [~] Force-pair: \"{p1}\" + \"{p2}\" already clustered together")
+                    continue
+                clusters.append([p1, p2])
+                print(f"  [+] Force-pair injected into LLM review: \"{p1}\" + \"{p2}\"")
+            if forced_pairs:
+                print()
+
         if not clusters:
             print(f"\n  [OK] No similar clusters found at threshold {threshold:.2f}")
             print(f"{'=' * 62}\n")
@@ -1675,6 +1429,7 @@ async def run_llm_dedup(
         await conn.close()
 
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Merge duplicate entity nodes in a LightRAG PostgreSQL knowledge graph.",
@@ -1694,18 +1449,6 @@ def main() -> None:
         help="Actually apply merges. Without this flag the script runs in dry-run mode.",
     )
     parser.add_argument(
-        "--fix-graphml", action="store_true",
-        help="Sync the GraphML file with the VDB entity table (remove orphan nodes not in VDB).",
-    )
-    parser.add_argument(
-        "--delete", nargs="+", metavar="NAME",
-        help="Delete specific entity name(s) from all storage layers (use with --apply to execute).",
-    )
-    parser.add_argument(
-        "--detect-similar", action="store_true",
-        help="Find semantically similar entities using embedding cosine similarity (read-only).",
-    )
-    parser.add_argument(
         "--llm-dedup", action="store_true",
         help=(
             "Find similar clusters via cosine similarity, then ask LLM to decide "
@@ -1714,9 +1457,37 @@ def main() -> None:
     )
     parser.add_argument(
         "--threshold", type=float, default=0.9,
-        help="Cosine similarity threshold for --detect-similar and --llm-dedup (default: 0.9).",
+        help="Cosine similarity threshold for --llm-dedup (default: 0.9).",
+    )
+    parser.add_argument(
+        "--force-pair", nargs=2, metavar=("NAME1", "NAME2"), action="append",
+        dest="force_pairs", default=[],
+        help=(
+            "Force a name pair into LLM review regardless of cosine similarity "
+            "(use with --llm-dedup). Can be repeated for multiple pairs."
+        ),
+    )
+    parser.add_argument(
+        "--log", nargs="?", const="", default=None, metavar="FILE",
+        help=(
+            "Write all output to a log file in addition to the terminal. "
+            "If FILE is omitted, a timestamped filename is auto-generated "
+            "(e.g. dedup_20260226_153045.log)."
+        ),
     )
     args = parser.parse_args()
+
+    # --- set up tee logging if --log was passed ---
+    _log_file = None
+    if args.log is not None:
+        import datetime
+        log_path = args.log if args.log else (
+            f"dedup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        )
+        _log_file = open(log_path, "w", encoding="utf-8", errors="replace")
+        sys.stdout = _Tee(sys.stdout, _log_file)
+        sys.stderr = _Tee(sys.stderr, _log_file)
+        print(f"[log] Writing output to: {log_path}")
 
     if args.llm_dedup:
         asyncio.run(run_llm_dedup(
@@ -1724,24 +1495,7 @@ def main() -> None:
             env_path=args.env,
             threshold=args.threshold,
             apply=args.apply,
-        ))
-    elif args.detect_similar:
-        asyncio.run(run_detect_similar(
-            workspace=args.workspace,
-            env_path=args.env,
-            threshold=args.threshold,
-        ))
-    elif args.delete:
-        asyncio.run(run_delete(
-            workspace=args.workspace,
-            env_path=args.env,
-            names=args.delete,
-            apply=args.apply,
-        ))
-    elif args.fix_graphml:
-        asyncio.run(run_fix_graphml(
-            workspace=args.workspace,
-            env_path=args.env,
+            forced_pairs=[tuple(p) for p in args.force_pairs],
         ))
     else:
         asyncio.run(run(
@@ -1749,6 +1503,11 @@ def main() -> None:
             env_path=args.env,
             apply=args.apply,
         ))
+
+    if _log_file is not None:
+        _log_file.close()
+        sys.stdout = sys.stdout._stream
+        sys.stderr = sys.stderr._stream
 
 
 if __name__ == "__main__":
