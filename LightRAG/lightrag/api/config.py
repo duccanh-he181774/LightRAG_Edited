@@ -68,6 +68,7 @@ def get_default_host(binding_type: str) -> str:
         "gemini": os.getenv(
             "LLM_BINDING_HOST", "https://generativelanguage.googleapis.com"
         ),
+        "claude_cli": "local",  # no remote host needed
     }
     return default_hosts.get(
         binding_type, os.getenv("LLM_BINDING_HOST", "http://localhost:11434")
@@ -232,6 +233,7 @@ def parse_args() -> argparse.Namespace:
             "azure_openai",
             "aws_bedrock",
             "gemini",
+            "claude_cli",
         ],
         help="LLM binding type (default: from env or ollama)",
     )

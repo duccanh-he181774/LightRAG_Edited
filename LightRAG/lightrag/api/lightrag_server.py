@@ -308,6 +308,7 @@ def create_app(args):
         "azure_openai",
         "aws_bedrock",
         "gemini",
+        "claude_cli",
     ]:
         raise Exception("llm binding not supported")
 
@@ -620,6 +621,12 @@ def create_app(args):
                 )
             elif binding == "gemini":
                 return create_optimized_gemini_llm_func(config_cache, args, llm_timeout)
+            elif binding == "claude_cli":
+                # Uses the local claude CLI subprocess — no API key needed
+                import sys as _sys, os as _os
+                _sys.path.insert(0, _os.getcwd())
+                from llm_claude_cli import claude_cli_complete
+                return claude_cli_complete
             else:  # openai and compatible
                 # Use optimized function with pre-processed configuration
                 return create_optimized_openai_llm_func(config_cache, args, llm_timeout)

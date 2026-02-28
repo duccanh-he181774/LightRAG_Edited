@@ -1,0 +1,53 @@
+services:
+  lightrag:
+    container_name: lightrag
+    build:
+      context: ../LightRAG
+      dockerfile: Dockerfile
+    ports:
+      - "9621:9621"
+    volumes:
+      - rag_storage:/app/data/rag_storage
+      - inputs:/app/data/inputs
+      - ./.env.production:/app/.env
+    env_file:
+      - .env.production
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - webnet
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot-www:/var/www/certbot:ro
+      - ./certbot-conf:/etc/letsencrypt:ro
+    depends_on:
+      - lightrag
+    restart: unless-stopped
+    networks:
+      - webnet
+
+  certbot:
+    image: certbot/certbot
+    container_name: certbot
+    volumes:
+      - ./certbot-www:/var/www/certbot
+      - ./certbot-conf:/etc/letsencrypt
+    # Auto-renew every 12 hours
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    restart: unless-stopped
+
+volumes:
+  rag_storage:
+  inputs:
+
+networks:
+  webnet:
+    driver: bridge
