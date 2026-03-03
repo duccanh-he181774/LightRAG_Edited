@@ -1,0 +1,181 @@
+# =============================================================================
+# Docker Compose Configuration for GitHub PR Webhook Integration
+# =============================================================================
+#
+# This file extends the base docker-compose.yml with services needed for
+# GitHub PR webhook processing:
+#   - RabbitMQ: Message broker for Celery
+#   - Celery Worker: Background task processor
+#
+# Usage:
+#   # Start all services (including base LightRAG)
+#   docker-compose -f docker-compose.yml -f docker-compose.webhook.yml up -d
+#
+#   # Start only webhook services (assuming base services are running)
+#   docker-compose -f docker-compose.webhook.yml up -d
+#
+#   # View worker logs
+#   docker-compose -f docker-compose.webhook.yml logs -f celery-worker
+#
+#   # Scale workers
+#   docker-compose -f docker-compose.webhook.yml up -d --scale celery-worker=3
+#
+# Prerequisites:
+#   - Configure .env file with required environment variables
+#   - Set up GitHub webhook pointing to your LightRAG server
+#   - Configure Neon PostgreSQL for audit storage
+#
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # RabbitMQ Message Broker
+  # ===========================================================================
+  # RabbitMQ serves as the message broker for Celery tasks.
+  # The management plugin provides a web UI at port 15672.
+  #
+  # Default credentials: guest/guest (change in production!)
+  # Management UI: http://localhost:15672
+  # ===========================================================================
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: lightrag-rabbitmq
+    hostname: rabbitmq
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672" # AMQP protocol
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672" # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - lightrag-network
+
+  # ===========================================================================
+  # Celery Worker for PR Processing
+  # ===========================================================================
+  # This worker processes GitHub PR webhook events:
+  #   1. Fetches PR diff from GitHub API
+  #   2. Queries LightRAG for code summarization
+  #   3. Matches code changes to requirements
+  #   4. Stores audit logs in Neon PostgreSQL
+  #
+  # The worker connects to:
+  #   - RabbitMQ for task queue
+  #   - LightRAG storage for knowledge graph queries
+  #   - Neon PostgreSQL for audit storage
+  #   - GitHub API for fetching PR data
+  # ===========================================================================
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lightrag-celery-worker
+    command: >
+      celery -A lightrag.workers.celery_app worker --loglevel=${CELERY_LOG_LEVEL:-info} -Q pr_webhook,default --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
+    environment:
+      # Celery Configuration
+      CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/${RABBITMQ_VHOST:-/}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-rpc://}
+      CELERY_TASK_TIME_LIMIT: ${CELERY_TASK_TIME_LIMIT:-300}
+      CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-2}
+
+      # GitHub Configuration
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+
+      # LightRAG Configuration (for querying)
+      WORKING_DIR: ${WORKING_DIR:-/app/rag_storage}
+      LLM_BINDING: ${LLM_BINDING:-openai}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o}
+      LLM_BINDING_API_KEY: ${LLM_BINDING_API_KEY}
+      LLM_BINDING_HOST: ${LLM_BINDING_HOST:-https://api.openai.com/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+
+      # LightRAG Storage Configuration (must match main server)
+      LIGHTRAG_KV_STORAGE: ${LIGHTRAG_KV_STORAGE:-JsonKVStorage}
+      LIGHTRAG_VECTOR_STORAGE: ${LIGHTRAG_VECTOR_STORAGE:-NanoVectorDBStorage}
+      LIGHTRAG_GRAPH_STORAGE: ${LIGHTRAG_GRAPH_STORAGE:-NetworkXStorage}
+      LIGHTRAG_DOC_STATUS_STORAGE: ${LIGHTRAG_DOC_STATUS_STORAGE:-JsonDocStatusStorage}
+
+      # PostgreSQL Configuration (for LightRAG if using PG storage)
+      POSTGRES_HOST: ${POSTGRES_HOST:-}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DATABASE: ${POSTGRES_DATABASE:-}
+      POSTGRES_SSL_MODE: ${POSTGRES_SSL_MODE:-require}
+
+      # Neon PostgreSQL for Audit Storage
+      NEON_DATABASE_URL: ${NEON_DATABASE_URL}
+
+      # PR Processing Configuration
+      PR_QUERY_MODE: ${PR_QUERY_MODE:-mix}
+      PR_QUERY_TOP_K: ${PR_QUERY_TOP_K:-30}
+      PR_MAX_DIFF_CHARS: ${PR_MAX_DIFF_CHARS:-50000}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${WORKING_DIR:-./rag_storage}:/app/rag_storage:ro # Read-only access to RAG storage
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - lightrag-network
+  # ===========================================================================
+  # Celery Flower (Optional Monitoring)
+  # ===========================================================================
+  # Flower provides a web-based monitoring UI for Celery workers and tasks.
+  # Access at: http://localhost:5555
+  #
+  # Enable by uncommenting this service or running:
+  #   docker-compose -f docker-compose.webhook.yml up -d flower
+  # ===========================================================================
+  # flower:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: lightrag-flower
+  #   command: >
+  #     celery -A lightrag.workers.celery_app flower
+  #     --port=5555
+  #     --broker=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/${RABBITMQ_VHOST:-/}
+  #   ports:
+  #     - "${FLOWER_PORT:-5555}:5555"
+  #   environment:
+  #     CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/${RABBITMQ_VHOST:-/}
+  #     FLOWER_BASIC_AUTH: ${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+  #   depends_on:
+  #     - rabbitmq
+  #   restart: unless-stopped
+  #   networks:
+  #     - lightrag-network
+
+  # =============================================================================
+  # Volumes
+  # =============================================================================
+volumes:
+  rabbitmq_data:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+# Use the same network as the base docker-compose.yml
+# If running independently, this creates a new network
+# =============================================================================
+networks:
+  lightrag-network:
+    driver: bridge

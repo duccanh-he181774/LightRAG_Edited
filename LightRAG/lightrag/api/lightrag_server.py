@@ -54,6 +54,21 @@ from lightrag.api.routers.graph_routes import create_graph_routes
 from lightrag.api.routers.ollama_api import OllamaAPI
 
 from lightrag.utils import logger, set_verbose_debug
+
+# =============================================================================
+# GitHub PR Webhook Integration (optional)
+# =============================================================================
+# Import webhook routes conditionally to avoid requiring webhook dependencies
+# when the feature is not enabled. Enable via ENABLE_WEBHOOK=true in .env
+# =============================================================================
+try:
+    from lightrag.api.routers.webhook_routes import create_webhook_routes
+    WEBHOOK_ROUTES_AVAILABLE = True
+except ImportError:
+    WEBHOOK_ROUTES_AVAILABLE = False
+    create_webhook_routes = None
+# =============================================================================
+
 from lightrag.kg.shared_storage import (
     get_namespace_data,
     get_default_workspace,
@@ -172,7 +187,8 @@ def check_frontend_build():
         ASCIIColors.yellow("WARNING: Frontend Not Built")
         ASCIIColors.yellow("=" * 80)
         ASCIIColors.yellow("The WebUI frontend has not been built yet.")
-        ASCIIColors.yellow("The API server will start without the WebUI interface.")
+        ASCIIColors.yellow(
+            "The API server will start without the WebUI interface.")
         ASCIIColors.yellow(
             "\nTo enable WebUI, build the frontend using these commands:\n"
         )
@@ -198,10 +214,12 @@ def check_frontend_build():
             logger.debug(
                 "Production environment detected, skipping source freshness check"
             )
-            return (True, False)  # Assets exist, not outdated (prod environment)
+            # Assets exist, not outdated (prod environment)
+            return (True, False)
 
         # Development environment, perform source code timestamp check
-        logger.debug("Development environment detected, checking source freshness")
+        logger.debug(
+            "Development environment detected, checking source freshness")
 
         # Source code file extensions (files to check)
         source_extensions = {
@@ -256,7 +274,8 @@ def check_frontend_build():
         # Compare timestamps (5 second tolerance to avoid file system time precision issues)
         if latest_source_time > build_time + 5:
             ASCIIColors.yellow("\n" + "=" * 80)
-            ASCIIColors.yellow("WARNING: Frontend Source Code Has Been Updated")
+            ASCIIColors.yellow(
+                "WARNING: Frontend Source Code Has Been Updated")
             ASCIIColors.yellow("=" * 80)
             ASCIIColors.yellow(
                 "The frontend source code is newer than the current build."
@@ -271,7 +290,8 @@ def check_frontend_build():
             ASCIIColors.cyan("    bun install --frozen-lockfile")
             ASCIIColors.cyan("    bun run build")
             ASCIIColors.cyan("    cd ..")
-            ASCIIColors.yellow("\nThe server will continue with the current build.")
+            ASCIIColors.yellow(
+                "\nThe server will continue with the current build.")
             ASCIIColors.yellow("=" * 80 + "\n")
             return (True, True)  # Assets exist, outdated
         else:
@@ -336,7 +356,8 @@ def create_app(args):
                 "SSL certificate and key files must be provided when SSL is enabled"
             )
         if not os.path.exists(args.ssl_certfile):
-            raise Exception(f"SSL certificate file not found: {args.ssl_certfile}")
+            raise Exception(
+                f"SSL certificate file not found: {args.ssl_certfile}")
         if not os.path.exists(args.ssl_keyfile):
             raise Exception(f"SSL key file not found: {args.ssl_keyfile}")
 
@@ -552,8 +573,10 @@ def create_app(args):
                 system_prompt=system_prompt,
                 history_messages=history_messages,
                 base_url=args.llm_binding_host,
-                api_key=os.getenv("AZURE_OPENAI_API_KEY", args.llm_binding_api_key),
-                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+                api_key=os.getenv("AZURE_OPENAI_API_KEY",
+                                  args.llm_binding_api_key),
+                api_version=os.getenv(
+                    "AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
                 **kwargs,
             )
 
@@ -582,7 +605,8 @@ def create_app(args):
                 config_cache.gemini_llm_options is not None
                 and "generation_config" not in kwargs
             ):
-                kwargs["generation_config"] = dict(config_cache.gemini_llm_options)
+                kwargs["generation_config"] = dict(
+                    config_cache.gemini_llm_options)
 
             return await gemini_complete_if_cache(
                 args.llm_model,
@@ -715,7 +739,8 @@ def create_app(args):
                     f"embedding_dim={provider_embedding_dim}"
                 )
         except ImportError as e:
-            logger.warning(f"Could not import provider function for {binding}: {e}")
+            logger.warning(
+                f"Could not import provider function for {binding}: {e}")
 
         # Step 2: Apply priority (user config > provider default)
         # For max_token_size: explicit env var > provider default > None
@@ -758,7 +783,8 @@ def create_app(args):
                     else:
                         from lightrag.llm.binding_options import OllamaEmbeddingOptions
 
-                        ollama_options = OllamaEmbeddingOptions.options_dict(args)
+                        ollama_options = OllamaEmbeddingOptions.options_dict(
+                            args)
 
                     # Pass embed_model only if provided, let function use its default (bge-m3:latest)
                     kwargs = {
@@ -829,7 +855,8 @@ def create_app(args):
                     else:
                         from lightrag.llm.binding_options import GeminiEmbeddingOptions
 
-                        gemini_options = GeminiEmbeddingOptions.options_dict(args)
+                        gemini_options = GeminiEmbeddingOptions.options_dict(
+                            args)
 
                     # Pass model only if provided, let function use its default (gemini-embedding-001)
                     kwargs = {
@@ -904,7 +931,8 @@ def create_app(args):
             history_messages = []
 
         # Use global temperature for Bedrock
-        kwargs["temperature"] = get_env_value("BEDROCK_LLM_TEMPERATURE", 1.0, float)
+        kwargs["temperature"] = get_env_value(
+            "BEDROCK_LLM_TEMPERATURE", 1.0, float)
 
         return await bedrock_complete_if_cache(
             args.llm_model,
@@ -989,7 +1017,8 @@ def create_app(args):
         selected_rerank_func = rerank_functions.get(args.rerank_binding)
         if not selected_rerank_func:
             logger.error(f"Unsupported rerank binding: {args.rerank_binding}")
-            raise ValueError(f"Unsupported rerank binding: {args.rerank_binding}")
+            raise ValueError(
+                f"Unsupported rerank binding: {args.rerank_binding}")
 
         # Get default values from selected_rerank_func if args values are None
         if args.rerank_model is None or args.rerank_binding_host is None:
@@ -1025,7 +1054,8 @@ def create_app(args):
             if args.rerank_binding == "cohere":
                 # Enable chunking if configured (useful for models with token limits like ColBERT)
                 kwargs["enable_chunking"] = (
-                    os.getenv("RERANK_ENABLE_CHUNKING", "false").lower() == "true"
+                    os.getenv("RERANK_ENABLE_CHUNKING",
+                              "false").lower() == "true"
                 )
                 kwargs["max_tokens_per_doc"] = int(
                     os.getenv("RERANK_MAX_TOKENS_PER_DOC", "4096")
@@ -1101,6 +1131,39 @@ def create_app(args):
     # Add Ollama API routes
     ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)
     app.include_router(ollama_api.router, prefix="/api")
+
+    # =========================================================================
+    # GitHub PR Webhook Routes (optional)
+    # =========================================================================
+    # Register webhook routes if enabled and dependencies are available.
+    # These endpoints handle GitHub webhook events for PR processing.
+    #
+    # Endpoints:
+    #   POST /webhooks/github - Receive GitHub webhook events
+    #   GET /webhooks/github/status - Check webhook integration status
+    #   GET /webhooks/audits - List PR audit records
+    #   GET /webhooks/audits/{id} - Get specific audit record
+    # =========================================================================
+    if args.enable_webhook:
+        if WEBHOOK_ROUTES_AVAILABLE and create_webhook_routes is not None:
+            webhook_secret = args.github_webhook_secret
+            app.include_router(
+                create_webhook_routes(
+                    api_key=api_key,
+                    webhook_secret=webhook_secret,
+                )
+            )
+            logger.info("GitHub webhook routes enabled")
+            if not webhook_secret:
+                logger.warning(
+                    "GITHUB_WEBHOOK_SECRET not set - webhook signature verification disabled"
+                )
+        else:
+            logger.warning(
+                "Webhook feature enabled but dependencies not installed. "
+                "Install with: pip install lightrag-hku[webhook]"
+            )
+    # =========================================================================
 
     # Custom Swagger UI endpoint for offline support
     @app.get("/docs", include_in_schema=False)
@@ -1178,7 +1241,8 @@ def create_app(args):
             }
         username = form_data.username
         if auth_handler.accounts.get(username) != form_data.password:
-            raise HTTPException(status_code=401, detail="Incorrect credentials")
+            raise HTTPException(
+                status_code=401, detail="Incorrect credentials")
 
         # Regular user login
         user_token = auth_handler.create_token(
@@ -1305,7 +1369,8 @@ def create_app(args):
         async def get_response(self, path: str, scope):
             response = await super().get_response(path, scope)
 
-            is_html = path.endswith(".html") or response.media_type == "text/html"
+            is_html = path.endswith(
+                ".html") or response.media_type == "text/html"
 
             if is_html:
                 response.headers["Cache-Control"] = (
@@ -1381,14 +1446,16 @@ def configure_logging():
 
     # Get log directory path from environment variable
     log_dir = os.getenv("LOG_DIR", os.getcwd())
-    log_file_path = os.path.abspath(os.path.join(log_dir, DEFAULT_LOG_FILENAME))
+    log_file_path = os.path.abspath(
+        os.path.join(log_dir, DEFAULT_LOG_FILENAME))
 
     print(f"\nLightRAG log file: {log_file_path}\n")
     os.makedirs(os.path.dirname(log_dir), exist_ok=True)
 
     # Get log file max size and backup count from environment variables
     log_max_bytes = get_env_value("LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES, int)
-    log_backup_count = get_env_value("LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT, int)
+    log_backup_count = get_env_value(
+        "LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT, int)
 
     logging.config.dictConfig(
         {

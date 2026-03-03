@@ -114,7 +114,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--timeout",
-        default=get_env_value("TIMEOUT", DEFAULT_TIMEOUT, int, special_none=True),
+        default=get_env_value("TIMEOUT", DEFAULT_TIMEOUT,
+                              int, special_none=True),
         type=int,
         help="Timeout in seconds (useful when using slow AI). Use None for infinite timeout",
     )
@@ -129,7 +130,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--summary-max-tokens",
         type=int,
-        default=get_env_value("SUMMARY_MAX_TOKENS", DEFAULT_SUMMARY_MAX_TOKENS, int),
+        default=get_env_value("SUMMARY_MAX_TOKENS",
+                              DEFAULT_SUMMARY_MAX_TOKENS, int),
         help=f"Maximum token size for entity/relation summary(default: from env or {DEFAULT_SUMMARY_MAX_TOKENS})",
     )
     parser.add_argument(
@@ -192,14 +194,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--simulated-model-name",
         type=str,
-        default=get_env_value("OLLAMA_EMULATING_MODEL_NAME", DEFAULT_OLLAMA_MODEL_NAME),
+        default=get_env_value("OLLAMA_EMULATING_MODEL_NAME",
+                              DEFAULT_OLLAMA_MODEL_NAME),
         help="Name for the simulated Ollama model (default: from env or lightrag)",
     )
 
     parser.add_argument(
         "--simulated-model-tag",
         type=str,
-        default=get_env_value("OLLAMA_EMULATING_MODEL_TAG", DEFAULT_OLLAMA_MODEL_TAG),
+        default=get_env_value("OLLAMA_EMULATING_MODEL_TAG",
+                              DEFAULT_OLLAMA_MODEL_TAG),
         help="Tag for the simulated Ollama model (default: from env or latest)",
     )
 
@@ -264,6 +268,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Enable DOCLING document loading engine (default: from env or DEFAULT)",
+    )
+
+    # =============================================================================
+    # NEW: Webhook Configuration Arguments
+    # =============================================================================
+    parser.add_argument(
+        "--enable-webhook",
+        action="store_true",
+        default=get_env_value("ENABLE_WEBHOOK", False, bool),
+        help="Enable GitHub webhook endpoints for PR processing (default: from env or False)",
     )
 
     # Conditionally add binding-specific options (Ollama, OpenAI, Azure OpenAI, Gemini)
@@ -353,16 +367,19 @@ def parse_args() -> argparse.Namespace:
         "EMBEDDING_BINDING_HOST", get_default_host(args.embedding_binding)
     )
     args.llm_binding_api_key = get_env_value("LLM_BINDING_API_KEY", None)
-    args.embedding_binding_api_key = get_env_value("EMBEDDING_BINDING_API_KEY", "")
+    args.embedding_binding_api_key = get_env_value(
+        "EMBEDDING_BINDING_API_KEY", "")
 
     # Inject model configuration
     args.llm_model = get_env_value("LLM_MODEL", "mistral-nemo:latest")
     # EMBEDDING_MODEL defaults to None - each binding will use its own default model
     # e.g., OpenAI uses "text-embedding-3-small", Jina uses "jina-embeddings-v4"
-    args.embedding_model = get_env_value("EMBEDDING_MODEL", None, special_none=True)
+    args.embedding_model = get_env_value(
+        "EMBEDDING_MODEL", None, special_none=True)
     # EMBEDDING_DIM defaults to None - each binding will use its own default dimension
     # Value is inherited from provider defaults via wrap_embedding_func_with_attrs decorator
-    args.embedding_dim = get_env_value("EMBEDDING_DIM", None, int, special_none=True)
+    args.embedding_dim = get_env_value(
+        "EMBEDDING_DIM", None, int, special_none=True)
     args.embedding_send_dim = get_env_value("EMBEDDING_SEND_DIM", False, bool)
 
     # Inject chunk configuration
@@ -388,20 +405,25 @@ def parse_args() -> argparse.Namespace:
 
     # Add environment variables that were previously read directly
     args.cors_origins = get_env_value("CORS_ORIGINS", "*")
-    args.summary_language = get_env_value("SUMMARY_LANGUAGE", DEFAULT_SUMMARY_LANGUAGE)
-    args.entity_types = get_env_value("ENTITY_TYPES", DEFAULT_ENTITY_TYPES, list)
+    args.summary_language = get_env_value(
+        "SUMMARY_LANGUAGE", DEFAULT_SUMMARY_LANGUAGE)
+    args.entity_types = get_env_value(
+        "ENTITY_TYPES", DEFAULT_ENTITY_TYPES, list)
     args.whitelist_paths = get_env_value("WHITELIST_PATHS", "/health,/api/*")
 
     # For JWT Auth
     args.auth_accounts = get_env_value("AUTH_ACCOUNTS", "")
-    args.token_secret = get_env_value("TOKEN_SECRET", "lightrag-jwt-default-secret")
+    args.token_secret = get_env_value(
+        "TOKEN_SECRET", "lightrag-jwt-default-secret")
     args.token_expire_hours = get_env_value("TOKEN_EXPIRE_HOURS", 48, float)
-    args.guest_token_expire_hours = get_env_value("GUEST_TOKEN_EXPIRE_HOURS", 24, float)
+    args.guest_token_expire_hours = get_env_value(
+        "GUEST_TOKEN_EXPIRE_HOURS", 24, float)
     args.jwt_algorithm = get_env_value("JWT_ALGORITHM", "HS256")
 
     # Token auto-renewal configuration (sliding window expiration)
     args.token_auto_renew = get_env_value("TOKEN_AUTO_RENEW", True, bool)
-    args.token_renew_threshold = get_env_value("TOKEN_RENEW_THRESHOLD", 0.5, float)
+    args.token_renew_threshold = get_env_value(
+        "TOKEN_RENEW_THRESHOLD", 0.5, float)
 
     # Rerank model configuration
     args.rerank_model = get_env_value("RERANK_MODEL", None)
@@ -415,7 +437,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Query configuration
-    args.history_turns = get_env_value("HISTORY_TURNS", DEFAULT_HISTORY_TURNS, int)
+    args.history_turns = get_env_value(
+        "HISTORY_TURNS", DEFAULT_HISTORY_TURNS, int)
     args.top_k = get_env_value("TOP_K", DEFAULT_TOP_K, int)
     args.chunk_top_k = get_env_value("CHUNK_TOP_K", DEFAULT_CHUNK_TOP_K, int)
     args.max_entity_tokens = get_env_value(
@@ -455,6 +478,34 @@ def parse_args() -> argparse.Namespace:
     args.max_upload_size = get_env_value(
         "MAX_UPLOAD_SIZE", 104857600, int, special_none=True
     )
+
+    # =========================================================================
+    # GitHub PR Webhook Integration Configuration
+    # =========================================================================
+    # These settings configure the GitHub webhook integration for PR processing.
+    # Enable webhook via --enable-webhook flag or ENABLE_WEBHOOK=true env var.
+    # =========================================================================
+    # Note: args.enable_webhook is already set by argparse from --enable-webhook flag
+    args.github_webhook_secret = get_env_value("GITHUB_WEBHOOK_SECRET", "")
+    args.github_token = get_env_value("GITHUB_TOKEN", "")
+    args.github_api_url = get_env_value(
+        "GITHUB_API_URL", "https://api.github.com")
+
+    # Celery/RabbitMQ configuration for async PR processing
+    args.celery_broker_url = get_env_value(
+        "CELERY_BROKER_URL", "amqp://guest:guest@localhost:5672//"
+    )
+    args.celery_result_backend = get_env_value(
+        "CELERY_RESULT_BACKEND", "rpc://")
+
+    # Neon PostgreSQL for PR audit storage (separate from LightRAG storage)
+    args.neon_database_url = get_env_value("NEON_DATABASE_URL", "")
+
+    # PR processing configuration
+    args.pr_query_mode = get_env_value("PR_QUERY_MODE", "mix")
+    args.pr_query_top_k = get_env_value("PR_QUERY_TOP_K", 30, int)
+    args.pr_max_diff_chars = get_env_value("PR_MAX_DIFF_CHARS", 50000, int)
+    # =========================================================================
 
     ollama_server_infos.LIGHTRAG_NAME = args.simulated_model_name
     ollama_server_infos.LIGHTRAG_TAG = args.simulated_model_tag
